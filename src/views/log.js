@@ -1,20 +1,27 @@
 import { el, clear, mount, copyToClipboard } from '../dom.js'
 import * as db from '../db.js'
-import { DAY_TYPES, WARMUP, MARTIAL, KIND_LABEL, EXERCISE_LIBRARY } from '../program.js'
+import { WARMUP, KIND_LABEL, EXERCISE_LIBRARY } from '../program.js'
 import { createRestTimer } from '../components/timer.js'
 import { buildSuggestions } from '../recommend.js'
 import { sessionMarkdown } from '../aiReport.js'
 
-const WEEKDAY_TO_DAY = { 1: 'Push', 2: 'Pull', 3: 'Legs', 4: 'Chest & Back', 5: 'Arms & Shoulders', 6: 'Bouldering' }
-const defaultDayFor = (dateStr) => WEEKDAY_TO_DAY[new Date(dateStr + 'T12:00:00').getDay()] || 'Push'
+const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const WD_OPTS = ['', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+const MARTIAL_KINDS = ['position', 'submission', 'sweep', 'escape', 'throw', 'technique', 'combo', 'defense']
+// Auto-pick the day whose configured weekday matches the date; else the first day.
+const defaultDayFor = (dateStr, days) => {
+  const wd = WEEKDAY_NAMES[new Date(dateStr + 'T12:00:00').getDay()]
+  return (days.find((d) => d.weekday === wd) || days[0])?.name || ''
+}
 
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') || 'exercise'
 
 export async function LogView(ctx) {
   let date = db.todayISO()
-  let dayType = defaultDayFor(date)
+  let dayType = null // resolved on each refresh from the (editable) day list
   const extraRows = {} // `${key}|${side}` -> extra count
   let editing = false // program-edit mode for the current day
+  let managingDays = false // day-type manager panel
   let showSuggestions = true
   const timer = createRestTimer(ctx.timerHost)
   const root = el('div')
@@ -236,9 +243,106 @@ export async function LogView(ctx) {
       el('button.btn.full', { style: { marginTop: '10px' }, onclick: addCustom }, '+ Add a custom exercise'))
   }
 
+  // ---- Day-type manager (add / rename / reorder / configure / delete) --------
+  async function moveDay(dayNames, idx, dir) {
+    const j = idx + dir
+    if (j < 0 || j >= dayNames.length) return
+    const arr = [...dayNames]
+    ;[arr[idx], arr[j]] = [arr[j], arr[idx]]
+    await db.saveDayTypeOrder(arr); refresh()
+  }
+
+  async function removeDay(name) {
+    const ok = await db.deleteDayType(name)
+    if (!ok) { ctx.toast('Has logged sessions — rename it instead'); return }
+    if (dayType === name) dayType = null
+    ctx.toast('Day deleted'); refresh()
+  }
+
+  function dayRow(program, dayNames, name) {
+    const meta = program[name]
+    const idx = dayNames.indexOf(name)
+
+    const nameInput = el('input', { value: name })
+    nameInput.addEventListener('change', async () => {
+      const nn = nameInput.value.trim()
+      if (!nn || nn === name) { nameInput.value = name; return }
+      const ok = await db.renameDayType(name, nn)
+      if (!ok) { ctx.toast('Name taken or invalid'); nameInput.value = name; return }
+      if (dayType === name) dayType = nn
+      ctx.toast('Renamed'); refresh()
+    })
+
+    const kindSel = el('select', ['lifting', 'bouldering', 'martial'].map((k) => el('option', { value: k, selected: meta.kind === k }, k)))
+    kindSel.addEventListener('change', async () => {
+      const k = kindSel.value
+      await db.updateDayType(name, { kind: k, martial: k === 'martial' ? (meta.martialCfg || { unit: 'rounds', kinds: [] }) : null })
+      ctx.toast('Updated'); refresh()
+    })
+
+    const wdSel = el('select', WD_OPTS.map((w) => el('option', { value: w, selected: (meta.weekday || '') === w }, w || '— weekday —')))
+    wdSel.addEventListener('change', async () => { await db.updateDayType(name, { weekday: wdSel.value }); ctx.toast('Updated') })
+
+    let kindsBlock = null
+    if (meta.kind === 'martial') {
+      let kinds = [...((meta.martialCfg && meta.martialCfg.kinds) || [])]
+      const boxes = MARTIAL_KINDS.map((k) => {
+        const cb = el('input', { type: 'checkbox' }); cb.checked = kinds.includes(k)
+        cb.addEventListener('change', async () => {
+          const s = new Set(kinds); cb.checked ? s.add(k) : s.delete(k)
+          kinds = MARTIAL_KINDS.filter((x) => s.has(x))
+          await db.updateDayType(name, { martial: { unit: (meta.martialCfg && meta.martialCfg.unit) || 'rounds', kinds } })
+        })
+        return el('label.chk', cb, el('span', KIND_LABEL[k] || k))
+      })
+      kindsBlock = el('div', { style: { marginTop: '8px' } },
+        el('div.muted', { style: { fontSize: '12px', marginBottom: '4px' } }, 'Tagged lists this session shows:'),
+        el('div.spread', boxes))
+    }
+
+    return el('div.card',
+      el('div.row.between',
+        el('div', { style: { flex: '1 1 auto' } }, nameInput),
+        el('div.spread',
+          el('button.btn.ghost.sm', { onclick: () => moveDay(dayNames, idx, -1), disabled: idx === 0 }, '↑'),
+          el('button.btn.ghost.sm', { onclick: () => moveDay(dayNames, idx, 1), disabled: idx === dayNames.length - 1 }, '↓'),
+          el('button.btn.danger.sm', { onclick: () => removeDay(name) }, '✕'))),
+      el('div.grid2', { style: { marginTop: '8px' } },
+        el('div', el('label', 'Kind'), kindSel),
+        el('div', el('label', 'Weekday'), wdSel)),
+      kindsBlock)
+  }
+
+  function manageDaysView(program, dayNames) {
+    const addName = el('input', { placeholder: 'New day name — e.g. Upper' })
+    const addKind = el('select', ['lifting', 'bouldering', 'martial'].map((k) => el('option', { value: k }, k)))
+    const addWd = el('select', WD_OPTS.map((w) => el('option', { value: w }, w || '— weekday —')))
+    const add = async () => {
+      const nm = addName.value.trim()
+      if (!nm) { ctx.toast('Name the day'); return }
+      const k = addKind.value
+      const created = await db.addDayType({ name: nm, kind: k, weekday: addWd.value, martial: k === 'martial' ? { unit: 'rounds', kinds: [] } : null })
+      if (!created) { ctx.toast('Name already exists'); return }
+      ctx.toast('Day added'); refresh()
+    }
+    return el('div',
+      el('div.row.between', { style: { marginBottom: '6px' } },
+        el('h1', { style: { margin: 0 } }, 'Manage days'),
+        el('button.btn.ghost.sm', { onclick: () => { managingDays = false; refresh() } }, 'Done')),
+      el('p.sub', 'Add, rename, reorder or configure your session days. Renaming carries over your logged history. A lifting day’s exercises are edited from its Log screen (“Edit exercises”).'),
+      ...dayNames.map((n) => dayRow(program, dayNames, n)),
+      el('div.card', { style: { marginTop: '12px' } },
+        el('div.exname', { style: { marginBottom: '8px' } }, 'Add a day'),
+        addName,
+        el('div.grid2', { style: { marginTop: '8px' } },
+          el('div', el('label', 'Kind'), addKind),
+          el('div', el('label', 'Weekday'), addWd)),
+        el('div', { style: { marginTop: '10px' } },
+          el('button.btn.primary', { onclick: add }, '+ Add day'))))
+  }
+
   // ---- Martial-arts session form --------------------------------------------
-  function martialCard(session, techTitles = []) {
-    const cfg = MARTIAL[dayType] || { kinds: [] }
+  function martialCard(session, techTitles = [], cfg = { kinds: [] }) {
     const m = session?.martial || {}
     const data = { rounds: m.rounds ?? '', minutes: m.minutes ?? '', mainFocus: m.mainFocus ?? '', notes: m.notes ?? '' }
     for (const k of cfg.kinds) data[k] = Array.isArray(m[k]) ? m[k].map((it) => ({ ...it })) : []
@@ -372,17 +476,24 @@ export async function LogView(ctx) {
     if (!session) { ctx.toast('Nothing logged yet'); return }
     const sets = await db.byIndex('sets', 'sessionId', session.id)
     const readiness = (await db.all('readiness')).find((r) => r.date === date) || null
-    const md = sessionMarkdown({ session, sets, readiness })
+    const meta = (await db.getProgram())[session.dayType] || null
+    const md = sessionMarkdown({ session, sets, readiness, meta })
     ctx.toast((await copyToClipboard(md)) ? 'Copied — paste into any AI' : 'Copy failed')
   }
 
   // ---- Render ----------------------------------------------------------------
   async function refresh() {
     const program = await db.getProgram()
+    const dayNames = Object.keys(program)
+    const days = dayNames.map((n) => ({ name: n, weekday: program[n].weekday }))
+    if (!dayType || !dayNames.includes(dayType)) dayType = defaultDayFor(date, days)
+
+    if (managingDays) { clear(root); mount(root, manageDaysView(program, dayNames)); window.scrollTo(0, 0); return }
+
     const dayMeta = program[dayType] || {}
     const exercises = dayMeta.exercises || []
-    const isBouldering = !!dayMeta.bouldering
-    const isMartialDay = !!dayMeta.martial
+    const isBouldering = dayMeta.kind === 'bouldering'
+    const isMartialDay = dayMeta.kind === 'martial'
     const isLifting = !isBouldering && !isMartialDay
 
     const session = (await db.all('sessions')).find((s) => s.date === date && s.dayType === dayType)
@@ -398,8 +509,8 @@ export async function LogView(ctx) {
     }
 
     const dateInput = el('input', { type: 'date', value: date })
-    dateInput.addEventListener('change', (e) => { date = e.target.value; dayType = defaultDayFor(date); editing = false; showSuggestions = true; for (const k in extraRows) delete extraRows[k]; refresh() })
-    const daySelect = el('select', DAY_TYPES.map((d) => el('option', { value: d, selected: d === dayType }, d)))
+    dateInput.addEventListener('change', (e) => { date = e.target.value; dayType = null; editing = false; showSuggestions = true; for (const k in extraRows) delete extraRows[k]; refresh() })
+    const daySelect = el('select', dayNames.map((d) => el('option', { value: d, selected: d === dayType }, d)))
     daySelect.addEventListener('change', (e) => { dayType = e.target.value; editing = false; showSuggestions = true; for (const k in extraRows) delete extraRows[k]; refresh() })
 
     clear(root)
@@ -415,8 +526,9 @@ export async function LogView(ctx) {
           isRestDay ? '🛌 Sunday is a rest day — logging anyway is fine.' : ''),
         el('div.spread', { style: { marginTop: '12px' } },
           el('button.btn.ghost.sm', { onclick: () => copyForAI(session) }, '📋 Copy for AI'),
+          el('button.btn.ghost.sm', { onclick: () => { managingDays = true; refresh() } }, '🗓 Manage days'),
           isLifting && el('button.btn.ghost.sm', { onclick: () => { editing = !editing; refresh() } }, editing ? '✓ Done editing' : '✎ Edit exercises'),
-          isLifting && dayMeta.customised && el('button.btn.ghost.sm', {
+          isLifting && dayMeta.customised && dayMeta.hasDefault && el('button.btn.ghost.sm', {
             onclick: async () => { if (confirm(`Reset ${dayType} to the default exercises? Your logged sets are kept.`)) { await db.resetDay(dayType); editing = false; refresh() } },
           }, '↺ Reset day'),
           session && el('button.btn.danger.sm', {
@@ -434,7 +546,7 @@ export async function LogView(ctx) {
         ? [el('p.sub', { style: { marginTop: '4px' } }, 'Add, remove, reorder or tweak this day’s exercises. Changes are saved to this day only.'),
            exercises.map((ex, i) => editorCard(ex, i, exercises)),
            addControls(exercises)]
-        : isMartialDay ? martialCard(session, techTitles)
+        : isMartialDay ? martialCard(session, techTitles, dayMeta.martialCfg)
         : isBouldering ? await boulderingCard(session)
         : exercises.length
           ? exercises.map((ex) => exerciseCard(ex, sets.filter((s) => s.exerciseKey === ex.key)))

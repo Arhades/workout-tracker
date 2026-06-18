@@ -47,9 +47,9 @@ function liftsMarkdown(sets) {
   return lines.join('\n')
 }
 
-function martialMarkdown(dayType, m) {
+function martialMarkdown(dayType, m, cfgArg = null) {
   if (!m) return ''
-  const cfg = MARTIAL[dayType] || { kinds: [] }
+  const cfg = cfgArg || MARTIAL[dayType] || { kinds: [] }
   const lines = [`## ${dayType} session`]
   const head = []
   if (m.rounds) head.push(`Rounds: ${m.rounds}`)
@@ -81,17 +81,19 @@ function boulderingMarkdown(b) {
 }
 
 // session: the sessions record. sets: its sets. readiness: that date's record or null.
-export function sessionMarkdown({ session, sets = [], readiness = null }) {
-  const meta = PROGRAM[session.dayType] || {}
-  const wd = meta.weekday ? ` (${meta.weekday})` : ''
+// meta: the day's metadata from db.getProgram() (kind / weekday / martialCfg). When
+// omitted, falls back to the static PROGRAM defaults (still works for default days).
+export function sessionMarkdown({ session, sets = [], readiness = null, meta = null }) {
+  const dm = meta || PROGRAM[session.dayType] || {}
+  const wd = dm.weekday ? ` (${dm.weekday})` : ''
   const parts = [`# Coaching request — ${session.dayType}${wd} · ${session.date}`, '', PREAMBLE]
 
   if (readiness) {
     parts.push(`## Readiness (this date)\nReadiness ${readiness.readiness}/10 · Soreness ${readiness.soreness}/10 · Sleep ${readiness.sleep_hours ?? '—'}h`)
   }
 
-  if (meta.martial) parts.push(martialMarkdown(session.dayType, session.martial))
-  else if (meta.bouldering) parts.push(boulderingMarkdown(session.bouldering))
+  if (dm.martial) parts.push(martialMarkdown(session.dayType, session.martial, dm.martialCfg))
+  else if (dm.bouldering) parts.push(boulderingMarkdown(session.bouldering))
   else parts.push(liftsMarkdown(sets))
 
   if (session.notes) parts.push(`## Notes\n${session.notes}`)
