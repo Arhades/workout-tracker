@@ -1,6 +1,6 @@
 // Hand-written service worker — caches the full app shell so the PWA launches
 // and works with zero network (offline-first). Bump CACHE to ship an update.
-const CACHE = 'workout-tracker-v5'
+const CACHE = 'workout-tracker-v6'
 
 const SHELL = [
   './',

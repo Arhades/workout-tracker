@@ -1,9 +1,10 @@
-// The DEFAULT program (PPL × Arnold hybrid, locked 2026-06-16).
+// The DEFAULT program (PPL × Arnold hybrid). This file holds the *defaults* only.
 //
-// This file holds the *defaults* only. The program is now editable: the user's
-// custom per-day exercise lists are persisted in IndexedDB (see db.js
-// getProgram / saveDay). When a day has no custom record, these defaults are
-// used live, so editing the defaults here still flows through.
+// The program is editable: the user's custom per-day exercise lists are persisted
+// in IndexedDB (see db.js getProgram / saveDay). When a day has no custom record,
+// these defaults are used live, so editing the defaults here still flows through.
+// The day LIST + per-day metadata (kind / weekday / martial cfg) are seeded from
+// here into the editable `dayTypes` store (db.js).
 //
 // `key` is a STABLE slug — it is the join key for the export schema and all
 // history/progression lookups. Never rename a key; the data is keyed on it.
@@ -25,61 +26,56 @@ export const DAY_TYPES = [
   'BJJ',
   'Judo',
   'Muay Thai',
+  'Calisthenics',
+  'Running',
 ]
 
 export const DEFAULT_PROGRAM = {
   Push: {
     weekday: 'Mon',
     exercises: [
-      { key: 'bb_shoulder_press', name: 'Barbell Shoulder Press', muscle: 'Shoulders', sets: 3, rir: '1–2', rest: 300, note: 'Top compound, done fresh (shoulder priority)' },
-      { key: 'bb_bench_press', name: 'Barbell Bench Press', muscle: 'Chest', sets: 3, rir: '1–2', rest: 300 },
-      { key: 'incline_db_press', name: 'Incline DB Press', muscle: 'Upper Chest', sets: 3, rir: '1', rest: 240 },
-      { key: 'tricep_pullover', name: 'Tricep Pullover', muscle: 'Triceps', sets: 2, rir: '—', rest: 180, optional: true, note: 'Optional; skip if fatigued' },
-      { key: 'lateral_raise', name: 'Lateral Raise', muscle: 'Side Delts', sets: 3, rir: '0', rest: 240, unilateral: U, note: 'Imbalance protocol — side delts' },
+      { key: 'overhead_press_db', name: 'Seated Dumbbell Shoulder Press', muscle: 'Shoulders', sets: 3, rir: '1–2', rest: 300, note: 'Top compound — done fresh (shoulder priority)' },
+      { key: 'incline_db_press', name: 'Incline Dumbbell Bench Press', muscle: 'Upper Chest', sets: 3, rir: '1–2', rest: 240 },
+      { key: 'lateral_raise', name: 'Lateral Raise', muscle: 'Side Delts', sets: 3, rir: '0', rest: 240, unilateral: U, note: 'Imbalance protocol — side delts (left to failure first)' },
+      { key: 'rope_pushdown', name: 'Tricep Rope Pushdowns', muscle: 'Triceps', sets: 3, rir: '1', rest: 180 },
     ],
   },
   Pull: {
     weekday: 'Tue',
     exercises: [
-      { key: 'bb_row', name: 'Barbell Row', muscle: 'Back', sets: 3, rir: '1–2', rest: 300, note: 'Bilateral (kept barbell for functionality)' },
-      { key: 'lat_pullover_sa', name: 'Lat Pullover (single-arm)', muscle: 'Lats', sets: 3, rir: '0', rest: 240, unilateral: U, note: 'Imbalance protocol — lats' },
-      { key: 'close_grip_row', name: 'Close-Grip Row', muscle: 'Back', sets: 3, rir: '1–2', rest: 300 },
-      { key: 'seated_incline_db_curl', name: 'Seated Incline DB Curl', muscle: 'Biceps', sets: 3, rir: '1–2', rest: 300 },
-      { key: 'rear_delt_pull_sa', name: 'Rear Delt Pull (single-arm cable)', muscle: 'Rear Delts', sets: 3, rir: '0', rest: 240, unilateral: U, note: 'Imbalance protocol — rear delts' },
+      { key: 'single_arm_db_row', name: 'Single-Arm Dumbbell Row', muscle: 'Back', sets: 3, rir: '1–2', rest: 300, unilateral: U, note: 'Left side first (imbalance)' },
+      { key: 'rear_delt_pull_sa', name: 'Rear Delt Cable Flys', muscle: 'Rear Delts', sets: 3, rir: '0', rest: 240, unilateral: U, note: 'Imbalance protocol — rear delts (left to failure first)' },
+      { key: 'seated_incline_db_curl', name: 'Seated Incline Dumbbell Curls', muscle: 'Biceps', sets: 3, rir: '1–2', rest: 240 },
     ],
   },
   Legs: {
     weekday: 'Wed',
     exercises: [
-      { key: 'squat', name: 'Squat', muscle: 'Quads', sets: 3, rir: '1–2', rest: 300 },
-      { key: 'rdl', name: 'Romanian Deadlift', muscle: 'Posterior Chain', sets: 3, rir: '1–2', rest: 240, note: 'Hip power / posterior chain' },
+      { key: 'squat', name: 'Squat', muscle: 'Quads', sets: 3, rir: '1–2', rest: 300, note: 'Heavy — primary lift (wakes up the CNS)' },
+      { key: 'rdl', name: 'Romanian Deadlift', muscle: 'Posterior Chain', sets: 3, rir: '1–2', rest: 240, note: 'Hinge — performed second, while core is still fresh' },
+      { key: 'bulgarian_split_squat', name: 'Bulgarian Split Squat', muscle: 'Quads/Glutes', sets: 2, rir: '2', rest: 300, unilateral: U, note: 'Unilateral — helps the leg-side imbalance' },
       { key: 'leg_extension', name: 'Leg Extension', muscle: 'Quads', sets: 3, rir: '1–2', rest: 240 },
       { key: 'leg_curl', name: 'Leg Curl', muscle: 'Hamstrings', sets: 3, rir: '1–2', rest: 240 },
-      { key: 'bulgarian_split_squat', name: 'Bulgarian Split Squat', muscle: 'Quads/Glutes', sets: 2, rir: '2', rest: 300, unilateral: U, note: 'Unilateral — helps leg-side imbalance' },
-      { key: 'hip_abductor_adductor', name: 'Hip Abductor / Adductor', muscle: 'Hips', sets: 3, rir: '1–2', rest: 240 },
       { key: 'lateral_raise', name: 'Lateral Raise', muscle: 'Side Delts', sets: 3, rir: '0', rest: 240, unilateral: U, note: 'Imbalance protocol — side delts' },
-      { key: 'hanging_leg_raise', name: 'Hanging Leg Raise', muscle: 'Core', sets: 3, rir: '—', rest: 120, note: 'Core — also grip/lat carryover' },
-      { key: 'pallof_press', name: 'Pallof Press', muscle: 'Core', sets: 3, rir: '—', rest: 120, unilateral: U, note: 'Anti-rotation (per side), MMA carryover' },
     ],
   },
   'Chest & Back': {
     weekday: 'Thu',
     exercises: [
-      { key: 'pull_ups', name: 'Pull-ups', muscle: 'Lats', sets: 3, rir: '—', rest: 180, toFailure: true, note: 'Dedicated failure pull-up day' },
-      { key: 'lat_pulldown_sa', name: 'Lat Pulldown (single-arm)', muscle: 'Lats', sets: 3, rir: '1–2', rest: 300, unilateral: U, note: 'Imbalance protocol — lats' },
-      { key: 'lat_pullover_sa', name: 'Lat Pullover (single-arm)', muscle: 'Lats', sets: 3, rir: '0', rest: 300, unilateral: U, note: 'Imbalance protocol — lats' },
-      { key: 'rear_delt_pull_sa', name: 'Rear Delt Pull (single-arm cable)', muscle: 'Rear Delts', sets: 3, rir: '0', rest: 240, unilateral: U, note: 'Imbalance protocol — rear delts' },
-      { key: 'chest_fly', name: 'Chest Fly / Pec Deck', muscle: 'Chest', sets: 3, rir: '1–2', rest: 300, note: 'Spares front delts for Day 5' },
+      { key: 'pull_ups', name: 'Weighted Pull-Ups', muscle: 'Lats', sets: 3, rir: '1', rest: 240, note: 'V-taper — add load' },
+      { key: 'lat_pulldown', name: 'Lat Pulldown', muscle: 'Lats', sets: 3, rir: '1–2', rest: 240 },
+      { key: 'straight_arm_pulldown', name: 'Straight-Arm Lat Pullover', muscle: 'Lats', sets: 3, rir: '0', rest: 240 },
+      { key: 'chest_fly', name: 'Pec Deck / Chest Flys', muscle: 'Chest', sets: 3, rir: '1–2', rest: 240, note: 'Spares front delts for Day 5' },
     ],
   },
   'Arms & Shoulders': {
     weekday: 'Fri',
     exercises: [
-      { key: 'db_shoulder_press', name: 'Shoulder DB Press', muscle: 'Shoulders', sets: 3, rir: '1–2', rest: 300, note: 'Front delts recovered since Mon' },
+      { key: 'db_shoulder_press', name: 'Standing Overhead Press (DB)', muscle: 'Shoulders', sets: 3, rir: '1–2', rest: 240, note: 'Front delts recovered since Day 1' },
       { key: 'lateral_raise', name: 'Lateral Raise', muscle: 'Side Delts', sets: 3, rir: '0', rest: 240, unilateral: U, note: 'Imbalance protocol — side delts' },
-      { key: 'seated_incline_db_curl', name: 'Seated Incline DB Curl', muscle: 'Biceps', sets: 3, rir: '1–2', rest: 240 },
-      { key: 'reverse_db_curl', name: 'Reverse DB Curl', muscle: 'Forearms/Biceps', sets: 3, rir: '1–2', rest: 240 },
-      { key: 'tricep_extension', name: 'Tricep Extension', muscle: 'Triceps', sets: 3, rir: '1–2', rest: 240 },
+      { key: 'seated_incline_db_curl', name: 'Seated Incline Dumbbell Curls', muscle: 'Biceps', sets: 3, rir: '1–2', rest: 240 },
+      { key: 'reverse_db_curl', name: 'Reverse DB Curls', muscle: 'Forearms/Biceps', sets: 3, rir: '1–2', rest: 240 },
+      { key: 'overhead_tricep_ext', name: 'Overhead Tricep Extension', muscle: 'Triceps', sets: 3, rir: '1–2', rest: 240 },
     ],
   },
   Bouldering: {
@@ -94,6 +90,18 @@ export const DEFAULT_PROGRAM = {
   BJJ: { martial: 'BJJ', exercises: [] },
   Judo: { martial: 'Judo', exercises: [] },
   'Muay Thai': { martial: 'Muay Thai', exercises: [] },
+  // ---- Calisthenics (skill-focused bodyweight; logged like a lifting day) --
+  Calisthenics: {
+    exercises: [
+      { key: 'handstand', name: 'Handstand Hold', muscle: 'Shoulders', sets: 3, rir: '—', rest: 120, note: 'Skill — log seconds held in the reps field' },
+      { key: 'l_sit', name: 'L-Sit Hold', muscle: 'Core', sets: 3, rir: '—', rest: 120, note: 'Skill — log seconds held in the reps field' },
+      { key: 'tuck_planche', name: 'Tuck Planche Hold', muscle: 'Shoulders', sets: 3, rir: '—', rest: 120, note: 'Skill — log seconds held in the reps field' },
+      { key: 'pull_up', name: 'Pull-ups', muscle: 'Lats', sets: 3, rir: '1', rest: 120 },
+      { key: 'dips', name: 'Dips', muscle: 'Triceps', sets: 3, rir: '1', rest: 120 },
+    ],
+  },
+  // ---- Running (cardio: distance + time + notes, no sets/RIR) --------------
+  Running: { cardio: true, exercises: [] },
 }
 
 // Backward-compatible alias. Prefer db.getProgram() (custom-aware) for the Log
@@ -122,8 +130,8 @@ export const KIND_LABEL = {
 
 export function isMartial(dayType) { return !!PROGRAM[dayType]?.martial }
 
-// Warm-up reminder shown on every lifting session.
-export const WARMUP = 'Rotator cuff: internal + external rotation — 2–3 sets each.'
+// Warm-up reminder shown on every lifting session (the daily pre-workout protocol).
+export const WARMUP = 'Rotator cuff: internal + external rotation (2–3 sets each) + 5 min handstand practice.'
 
 export function exercisesFor(dayType) {
   return PROGRAM[dayType]?.exercises ?? []
@@ -139,6 +147,7 @@ const LIBRARY_EXTRA = [
   { key: 'machine_lateral_raise', name: 'Machine Lateral Raise', muscle: 'Side Delts', sets: 3, rir: '0', rest: 180 },
   { key: 'face_pull', name: 'Face Pull', muscle: 'Rear Delts', sets: 3, rir: '0', rest: 180 },
   { key: 'reverse_pec_deck', name: 'Reverse Pec Deck', muscle: 'Rear Delts', sets: 3, rir: '0', rest: 180 },
+  { key: 'single_arm_db_row', name: 'Single-Arm Dumbbell Row', muscle: 'Back', sets: 3, rir: '1–2', rest: 240, unilateral: U },
   { key: 'pull_up', name: 'Pull-up', muscle: 'Lats', sets: 3, rir: '1', rest: 180, toFailure: true },
   { key: 'lat_pulldown', name: 'Lat Pulldown (bilateral)', muscle: 'Lats', sets: 3, rir: '1–2', rest: 240 },
   { key: 'straight_arm_pulldown', name: 'Straight-Arm Pulldown', muscle: 'Lats', sets: 3, rir: '1', rest: 180 },

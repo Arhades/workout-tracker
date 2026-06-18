@@ -44,6 +44,7 @@ export async function LogView(ctx) {
         date, dayType, notes: '',
         bouldering: meta?.bouldering ? { minutes: '', grades: '', notes: '' } : null,
         martial: meta?.martial ? {} : null,
+        cardio: meta?.cardio ? { distance: '', minutes: '', notes: '' } : null,
       })
     }
   }
@@ -273,7 +274,7 @@ export async function LogView(ctx) {
       ctx.toast('Renamed'); refresh()
     })
 
-    const kindSel = el('select', ['lifting', 'bouldering', 'martial'].map((k) => el('option', { value: k, selected: meta.kind === k }, k)))
+    const kindSel = el('select', ['lifting', 'bouldering', 'martial', 'cardio'].map((k) => el('option', { value: k, selected: meta.kind === k }, k)))
     kindSel.addEventListener('change', async () => {
       const k = kindSel.value
       await db.updateDayType(name, { kind: k, martial: k === 'martial' ? (meta.martialCfg || { unit: 'rounds', kinds: [] }) : null })
@@ -315,7 +316,7 @@ export async function LogView(ctx) {
 
   function manageDaysView(program, dayNames) {
     const addName = el('input', { placeholder: 'New day name — e.g. Upper' })
-    const addKind = el('select', ['lifting', 'bouldering', 'martial'].map((k) => el('option', { value: k }, k)))
+    const addKind = el('select', ['lifting', 'bouldering', 'martial', 'cardio'].map((k) => el('option', { value: k }, k)))
     const addWd = el('select', WD_OPTS.map((w) => el('option', { value: w }, w || '— weekday —')))
     const add = async () => {
       const nm = addName.value.trim()
@@ -451,6 +452,29 @@ export async function LogView(ctx) {
       fieldB('Notes', 'notes', 'Projects, skin, grip fatigue…', true))
   }
 
+  async function cardioCard(session) {
+    const c = session?.cardio || { distance: '', minutes: '', notes: '' }
+    const save = async (patch) => {
+      const id = await ensureSession()
+      const cur = (await db.get('sessions', id)).cardio || {}
+      await db.update('sessions', id, { cardio: { ...cur, ...patch } })
+    }
+    const fieldC = (labelText, key, ph, mode, ta) => {
+      let val = c[key] ?? ''
+      const input = (ta ? el('textarea', { placeholder: ph }) : el('input', { inputmode: mode || 'text', placeholder: ph }))
+      input.value = val
+      input.addEventListener('input', (e) => (val = e.target.value))
+      input.addEventListener('blur', () => save({ [key]: val }))
+      return el('div', { style: { marginTop: '10px' } }, el('label', labelText), input)
+    }
+    return el('div.card',
+      el('div.exname', `${dayType} session`),
+      el('div.exmeta', { style: { marginBottom: '4px' } }, 'Cardio — distance, time, notes'),
+      fieldC('Distance (km)', 'distance', 'e.g. 5.0', 'decimal'),
+      fieldC('Time (minutes)', 'minutes', 'e.g. 28', 'numeric'),
+      fieldC('Notes', 'notes', 'Route, RPE, how it felt…', 'text', true))
+  }
+
   function notesCard(session) {
     let val = session?.notes || ''
     const ta = el('textarea', { placeholder: 'How it felt, pain, swaps…' })
@@ -494,7 +518,8 @@ export async function LogView(ctx) {
     const exercises = dayMeta.exercises || []
     const isBouldering = dayMeta.kind === 'bouldering'
     const isMartialDay = dayMeta.kind === 'martial'
-    const isLifting = !isBouldering && !isMartialDay
+    const isCardio = dayMeta.kind === 'cardio'
+    const isLifting = !isBouldering && !isMartialDay && !isCardio
 
     const session = (await db.all('sessions')).find((s) => s.date === date && s.dayType === dayType)
     const sets = session ? await db.byIndex('sets', 'sessionId', session.id) : []
@@ -548,6 +573,7 @@ export async function LogView(ctx) {
            addControls(exercises)]
         : isMartialDay ? martialCard(session, techTitles, dayMeta.martialCfg)
         : isBouldering ? await boulderingCard(session)
+        : isCardio ? await cardioCard(session)
         : exercises.length
           ? exercises.map((ex) => exerciseCard(ex, sets.filter((s) => s.exerciseKey === ex.key)))
           : el('div.empty', 'No exercises for this day. Tap “Edit exercises” to add some.'),

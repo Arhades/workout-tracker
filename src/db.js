@@ -4,7 +4,7 @@
 import { DEFAULT_PROGRAM, DAY_TYPES, MARTIAL } from './program.js'
 
 const DB_NAME = 'workout_tracker'
-const DB_VERSION = 4
+const DB_VERSION = 5
 let _db = null
 
 // Default technique categories — seeded once into the `techCategories` store on
@@ -24,7 +24,7 @@ export const DEFAULT_TECH_CATEGORIES = [
 function seedDayTypeRecords() {
   return DAY_TYPES.map((name, i) => {
     const def = DEFAULT_PROGRAM[name] || {}
-    const kind = def.martial ? 'martial' : def.bouldering ? 'bouldering' : 'lifting'
+    const kind = def.martial ? 'martial' : def.bouldering ? 'bouldering' : def.cardio ? 'cardio' : 'lifting'
     const m = MARTIAL[name]
     return {
       name, kind, weekday: def.weekday || '', order: i,
@@ -37,7 +37,7 @@ function openDb() {
   if (_db) return Promise.resolve(_db)
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION)
-    req.onupgradeneeded = () => {
+    req.onupgradeneeded = (event) => {
       const db = req.result
       if (!db.objectStoreNames.contains('sessions')) {
         const s = db.createObjectStore('sessions', { keyPath: 'id', autoIncrement: true })
@@ -71,6 +71,14 @@ function openDb() {
       if (!db.objectStoreNames.contains('dayTypes')) {
         const s = db.createObjectStore('dayTypes', { keyPath: 'name' })
         for (const d of seedDayTypeRecords()) s.add(d)
+      }
+      // v5: add newer default day types (Calisthenics, Running) for users
+      // upgrading from v4, without clobbering any customised existing days.
+      if (event && event.oldVersion < 5 && db.objectStoreNames.contains('dayTypes')) {
+        const dt = req.transaction.objectStore('dayTypes')
+        for (const d of seedDayTypeRecords()) {
+          if (d.name === 'Calisthenics' || d.name === 'Running') dt.put(d)
+        }
       }
     }
     req.onsuccess = () => { _db = req.result; resolve(_db) }
@@ -190,6 +198,7 @@ export async function getProgram() {
       weekday: d.weekday || undefined,
       kind: d.kind,
       bouldering: d.kind === 'bouldering' ? true : undefined,
+      cardio: d.kind === 'cardio' ? true : undefined,
       martial: d.kind === 'martial' ? d.name : undefined,
       martialCfg: d.kind === 'martial' ? (d.martial || { unit: 'rounds', kinds: [] }) : null,
       exercises: custom[d.name] ?? seedEx,
@@ -330,7 +339,7 @@ export async function deleteSession(id) {
 // ---- Export / Import --------------------------------------------------------
 // The export schema is the stable, versioned single source of truth for the
 // future offline ML layer. Keep it clean. Bump SCHEMA_VERSION on any change.
-export const SCHEMA_VERSION = 4
+export const SCHEMA_VERSION = 5
 
 export async function exportData() {
   const [sessions, sets, readiness, program, techniques, techCategories, dayTypes] = await Promise.all([
@@ -365,6 +374,7 @@ export async function exportData() {
         notes: s.notes || '',
         bouldering: s.bouldering || null,
         martial: s.martial || null,
+        cardio: s.cardio || null,
         sets: (setsBySession[s.id] || [])
           .sort((a, b) => (a.order || 0) - (b.order || 0))
           .map((x) => ({
@@ -439,7 +449,7 @@ export async function importData(doc) {
     }
     const sessionId = await add('sessions', {
       date: s.date, dayType: s.day_type, notes: s.notes || '',
-      bouldering: s.bouldering || null, martial: s.martial || null,
+      bouldering: s.bouldering || null, martial: s.martial || null, cardio: s.cardio || null,
     })
     let order = 0
     for (const x of s.sets || []) {

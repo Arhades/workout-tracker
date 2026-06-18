@@ -80,6 +80,15 @@ function boulderingMarkdown(b) {
   return lines.join('\n')
 }
 
+function cardioMarkdown(c) {
+  if (!c) return ''
+  const lines = ['## Cardio session']
+  if (c.distance) lines.push(`Distance: ${c.distance} km`)
+  if (c.minutes) lines.push(`Time: ${c.minutes} min`)
+  if (c.notes) lines.push(`Notes: ${c.notes}`)
+  return lines.join('\n')
+}
+
 // session: the sessions record. sets: its sets. readiness: that date's record or null.
 // meta: the day's metadata from db.getProgram() (kind / weekday / martialCfg). When
 // omitted, falls back to the static PROGRAM defaults (still works for default days).
@@ -94,6 +103,7 @@ export function sessionMarkdown({ session, sets = [], readiness = null, meta = n
 
   if (dm.martial) parts.push(martialMarkdown(session.dayType, session.martial, dm.martialCfg))
   else if (dm.bouldering) parts.push(boulderingMarkdown(session.bouldering))
+  else if (dm.cardio) parts.push(cardioMarkdown(session.cardio))
   else parts.push(liftsMarkdown(sets))
 
   if (session.notes) parts.push(`## Notes\n${session.notes}`)
