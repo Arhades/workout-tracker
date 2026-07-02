@@ -1,20 +1,37 @@
 import { el, clear, mount, copyToClipboard } from '../dom.js'
 import * as db from '../db.js'
-import { WARMUP, KIND_LABEL, EXERCISE_LIBRARY } from '../program.js'
+import { WARMUP } from '../program.js'
 import { createRestTimer } from '../components/timer.js'
 import { buildSuggestions } from '../recommend.js'
 import { sessionMarkdown } from '../aiReport.js'
+import { weeklyLoad, kindByDayMap } from '../load.js'
+import { deloadStatus } from '../deload.js'
 
 const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const WD_OPTS = ['', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-const MARTIAL_KINDS = ['position', 'submission', 'sweep', 'escape', 'throw', 'technique', 'combo', 'defense']
 // Auto-pick the day whose configured weekday matches the date; else the first day.
 const defaultDayFor = (dateStr, days) => {
   const wd = WEEKDAY_NAMES[new Date(dateStr + 'T12:00:00').getDay()]
   return (days.find((d) => d.weekday === wd) || days[0])?.name || ''
 }
 
-const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') || 'exercise'
+// ---- Library autocomplete matching -------------------------------------------
+// Loose token match so "one arm pull up" finds "Single-Arm Pull-Up": every query
+// token must prefix-match some name/muscle token (after a small synonym map).
+const SYNONYM = { one: 'single', 1: 'single', db: 'dumbbell', bb: 'barbell', ohp: 'overhead' }
+const normTokens = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+  .split(' ').filter(Boolean).map((t) => SYNONYM[t] || t)
+function libMatches(query, lib, max = 6) {
+  const q = normTokens(query)
+  if (!q.length) return []
+  const out = []
+  for (const e of lib) {
+    const hay = normTokens(e.name + ' ' + (e.muscle || ''))
+    if (q.every((t) => hay.some((h) => h.startsWith(t) || t.startsWith(h)))) out.push(e)
+    if (out.length >= max) break
+  }
+  return out
+}
 
 export async function LogView(ctx) {
   let date = db.todayISO()
@@ -22,7 +39,11 @@ export async function LogView(ctx) {
   const extraRows = {} // `${key}|${side}` -> extra count
   let editing = false // program-edit mode for the current day
   let managingDays = false // day-type manager panel
+  let managingLibrary = false // exercise-library manager panel
   let showSuggestions = true
+  let library = [] // exercise library snapshot (refreshed each render)
+  let templateExercises = [] // the day's PERMANENT exercises (program store)
+  let tempExercises = [] // this date's TEMPORARY exercises (sessionExercises store)
   const timer = createRestTimer(ctx.timerHost)
   const root = el('div')
 
@@ -39,13 +60,7 @@ export async function LogView(ctx) {
     async function add() {
       const again = (await db.all('sessions')).find((s) => s.date === date && s.dayType === dayType)
       if (again) return again.id
-      const meta = (await db.getProgram())[dayType]
-      return db.add('sessions', {
-        date, dayType, notes: '',
-        bouldering: meta?.bouldering ? { minutes: '', grades: '', notes: '' } : null,
-        martial: meta?.martial ? {} : null,
-        cardio: meta?.cardio ? { distance: '', minutes: '', notes: '' } : null,
-      })
+      return db.add('sessions', { date, dayType, notes: '', bouldering: null, martial: null, cardio: null })
     }
   }
 
@@ -58,39 +73,49 @@ export async function LogView(ctx) {
     }, 0)
   }
 
-  // ---- Set logging (unchanged behaviour) ------------------------------------
-  function setRow({ existing, exerciseKey, exerciseName, setIndex, side, isDropSet, showRir }) {
+  // ---- Persisting the day's exercise lists -----------------------------------
+  const stripTemp = (list) => list.map(({ temp, ...e }) => e)
+  async function savePermanent() { await db.saveDay(dayType, templateExercises) }
+  async function saveTemporary() { await db.saveSessionExercises(date, dayType, stripTemp(tempExercises)) }
+  async function saveListFor(ex) { ex.temp ? await saveTemporary() : await savePermanent() }
+
+  // ---- Set logging ------------------------------------------------------------
+  // A logged set is weight + reps only (the per-set RIR input is gone; each
+  // exercise shows an editable recommended RIR instead — see rirControl).
+  function setRow({ existing, exerciseKey, exerciseName, setIndex, side, isDropSet }) {
     const num = (v) => (v === '' || v == null ? null : Number(v))
     let weight = existing?.weight ?? ''
     let reps = existing?.reps ?? ''
-    let rir = existing?.rir ?? ''
+    // Track the record id in the closure so rapid box-to-box entry keeps writing
+    // the SAME record: the first non-empty blur inserts, every later blur updates.
+    let recId = existing?.id ?? null
+    let saving = Promise.resolve() // serialise persists so a second blur can't race the first insert
     const dot = el('span.done-dot' + (num(reps) != null ? '.on' : ''))
 
-    async function persist() {
-      const empty = weight === '' && reps === '' && rir === ''
-      if (existing) {
-        if (empty) { await db.del('sets', existing.id); scheduleRefresh(); return }
-        await db.update('sets', existing.id, { weight: num(weight), reps: num(reps), rir: num(rir) })
+    const persist = () => (saving = saving.then(async () => {
+      const empty = weight === '' && reps === ''
+      if (recId != null) {
+        if (empty) { const id = recId; recId = null; await db.del('sets', id); scheduleRefresh(); return }
+        await db.update('sets', recId, { weight: num(weight), reps: num(reps) })
       } else {
         if (empty) return
         const sessionId = await ensureSession()
-        await db.add('sets', {
+        recId = await db.add('sets', {
           sessionId, exerciseKey, exerciseName, setIndex, side: side ?? null,
-          isDropSet: !!isDropSet, weight: num(weight), reps: num(reps), rir: num(rir), order: Date.now(),
+          isDropSet: !!isDropSet, weight: num(weight), reps: num(reps), rir: null, order: Date.now(),
         })
         scheduleRefresh() // new row -> reveal next empty slot + update hints
       }
-    }
+    }))
 
     const mk = (ph, mode, get, set) => el('input', {
       inputmode: mode, placeholder: ph, value: get(),
       oninput: (e) => { set(e.target.value); dot.classList.toggle('on', num(reps) != null) },
       onblur: persist,
     })
-    const grid = el('div.' + (showRir ? 'grid3' : 'grid2'), { style: { flex: 1 } },
+    const grid = el('div.grid2', { style: { flex: 1 } },
       mk('kg', 'decimal', () => weight, (v) => (weight = v)),
       mk('reps', 'numeric', () => reps, (v) => (reps = v)),
-      showRir && mk('RIR', 'numeric', () => rir, (v) => (rir = v)),
     )
     return el('div.setrow' + (num(reps) != null ? '.logged' : ''),
       dot,
@@ -109,13 +134,40 @@ export async function LogView(ctx) {
       setRow({
         existing: saved.find((s) => s.setIndex === i) || null,
         exerciseKey: ex.key, exerciseName: ex.name, setIndex: i, side,
-        isDropSet: drop && i >= planned, showRir: false,
+        isDropSet: drop && i >= planned,
       }))
     return el('div',
       el('div.side-tag.side-' + side, { style: { width: 'auto', fontSize: '12px', marginBottom: '4px' } }, side === 'L' ? 'LEFT' : 'RIGHT'),
       rows,
       el('button.btn.ghost.sm', { style: { marginTop: '6px' }, onclick: () => { extraRows[k] = (extraRows[k] || 0) + 1; refresh() } }, drop ? '+ drop' : '+ set'),
     )
+  }
+
+  // Editable recommended RIR shown on every exercise card (persists in the day's
+  // template / this date's temp list until edited again).
+  function rirControl(ex) {
+    const wrap = el('span')
+    const show = () => {
+      clear(wrap)
+      wrap.append(el('button.rir', { title: 'Tap to edit the recommended RIR', onclick: edit }, `RIR ${ex.rir || '—'} ✎`))
+    }
+    const edit = () => {
+      clear(wrap)
+      const input = el('input', {
+        value: ex.rir === '—' ? '' : (ex.rir ?? ''), placeholder: '1–2',
+        style: { width: '72px', padding: '4px 8px', fontSize: '13px', display: 'inline-block' },
+      })
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') input.blur() })
+      input.addEventListener('blur', async () => {
+        ex.rir = input.value.trim() || '—'
+        await saveListFor(ex)
+        show()
+      })
+      wrap.append(input)
+      input.focus()
+    }
+    show()
+    return wrap
   }
 
   function exerciseCard(ex, setsForEx) {
@@ -143,7 +195,7 @@ export async function LogView(ctx) {
         setRow({
           existing: bySide.B.find((s) => s.setIndex === i) || null,
           exerciseKey: ex.key, exerciseName: ex.name, setIndex: i, side: null,
-          isDropSet: false, showRir: !ex.toFailure && ex.rir !== '—',
+          isDropSet: false,
         }))
       body = el('div', { style: { marginTop: '4px' } },
         rows,
@@ -155,8 +207,9 @@ export async function LogView(ctx) {
       el('div.exhead',
         el('div',
           el('div.exname', ex.name),
-          el('div.exmeta', `${ex.muscle} · ${ex.sets} sets · RIR ${ex.rir}`)),
+          el('div.exmeta', `${ex.muscle} · ${ex.sets} sets · `, rirControl(ex))),
         el('div.spread', { style: { justifyContent: 'flex-end' } },
+          ex.temp && el('span.pill', '📅 today only'),
           ex.unilateral && el('span.pill.uni', 'UNI L/R'),
           ex.toFailure && el('span.pill.fail', 'FAILURE'),
           ex.optional && el('span.pill.opt', 'OPT'))),
@@ -175,17 +228,15 @@ export async function LogView(ctx) {
     return k
   }
 
-  async function saveProgram(exercises) { await db.saveDay(dayType, exercises) }
-
-  function editorCard(ex, idx, exercises) {
-    const commit = async () => { await saveProgram(exercises) } // field edits: save, no re-render
+  function editorCard(ex, idx, list) {
+    const commit = async () => { await saveListFor(ex) } // field edits: save, no re-render
     const move = async (delta) => {
       const j = idx + delta
-      if (j < 0 || j >= exercises.length) return
-      ;[exercises[idx], exercises[j]] = [exercises[j], exercises[idx]]
-      await saveProgram(exercises); refresh()
+      if (j < 0 || j >= list.length) return
+      ;[list[idx], list[j]] = [list[j], list[idx]]
+      await saveListFor(ex); refresh()
     }
-    const remove = async () => { exercises.splice(idx, 1); await saveProgram(exercises); refresh() }
+    const remove = async () => { list.splice(idx, 1); await (ex.temp ? saveTemporary() : savePermanent()); refresh() }
 
     const text = (ph, get, set) => el('input', { placeholder: ph, value: get(), oninput: (e) => set(e.target.value), onblur: commit })
     const numField = (ph, mode, get, set) => el('input', { inputmode: mode, placeholder: ph, value: get(), oninput: (e) => set(e.target.value), onblur: commit })
@@ -195,9 +246,40 @@ export async function LogView(ctx) {
       return el('label.chk', cb, el('span', labelText))
     }
 
+    // Name edits change the display name ONLY — the key is never re-keyed, so
+    // logged history stays joined. Suggestions just help keep names canonical.
+    const nameSug = el('div.ac-list')
+    const nameInput = el('input', {
+      placeholder: 'Exercise name', value: ex.name,
+      oninput: (e) => {
+        ex.name = e.target.value
+        clear(nameSug)
+        for (const m of libMatches(ex.name, library, 3)) {
+          if (m.name === ex.name) continue
+          nameSug.append(el('button', {
+            onclick: async () => { ex.name = m.name; nameInput.value = m.name; clear(nameSug); await commit() },
+          }, m.name))
+        }
+      },
+      onblur: commit,
+    })
+
+    // Permanent (template) vs temporary (this date only) — moves the exercise
+    // between the program store and the date-scoped sessionExercises store.
+    const permCb = el('input', { type: 'checkbox' }); permCb.checked = !ex.temp
+    permCb.addEventListener('change', async () => {
+      const from = ex.temp ? tempExercises : templateExercises
+      const i = from.indexOf(ex)
+      if (i >= 0) from.splice(i, 1)
+      if (permCb.checked) { delete ex.temp; templateExercises.push(ex) }
+      else { ex.temp = true; tempExercises.push(ex) }
+      await savePermanent(); await saveTemporary()
+      refresh()
+    })
+
     return el('div.card.tight',
       el('div.row.between',
-        text('Exercise name', () => ex.name, (v) => (ex.name = v)),
+        el('div', { style: { flex: '1 1 auto' } }, nameInput, nameSug),
         el('div.spread', { style: { flex: '0 0 auto', marginLeft: '8px' } },
           el('button.btn.ghost.sm', { onclick: () => move(-1) }, '↑'),
           el('button.btn.ghost.sm', { onclick: () => move(1) }, '↓'),
@@ -208,43 +290,119 @@ export async function LogView(ctx) {
         el('div', el('label', 'RIR'), text('1–2', () => ex.rir ?? '', (v) => (ex.rir = v))),
         el('div', el('label', 'Rest (s)'), numField('240', 'numeric', () => ex.rest ?? '', (v) => (ex.rest = v === '' ? '' : Number(v))))),
       el('div.spread', { style: { marginTop: '8px' } },
+        el('label.chk', permCb, el('span', 'Permanent')),
         check('Unilateral L/R', () => ex.unilateral, (v) => (ex.unilateral = v || undefined)),
         check('To failure', () => ex.toFailure, (v) => (ex.toFailure = v || undefined)),
         check('Optional', () => ex.optional, (v) => (ex.optional = v || undefined))),
+      ex.temp && el('div.muted', { style: { fontSize: '12px', marginTop: '6px' } }, `📅 Today only (${date}) — won’t appear on future ${dayType} days.`),
     )
   }
 
-  function addControls(exercises) {
-    // Add from library
-    const opts = [el('option', { value: '' }, '+ Add from library…')]
-    let lastMuscle = null
-    for (const e of EXERCISE_LIBRARY) {
-      const label = (e.muscle !== lastMuscle ? `[${e.muscle}] ` : '') + e.name
-      lastMuscle = e.muscle
-      opts.push(el('option', { value: e.key }, label))
-    }
-    const sel = el('select', opts)
-    sel.addEventListener('change', async (e) => {
-      const lib = EXERCISE_LIBRARY.find((x) => x.key === e.target.value)
-      if (!lib) return
-      exercises.push({ ...lib, key: uniqueKey(lib.key, exercises) })
-      await saveProgram(exercises); refresh()
-    })
+  // Autocomplete add: typing filters the canonical library; picking a match
+  // reuses its stable key so Progress history stays joined. A genuinely new
+  // name is added to the library (fresh key) and reused thereafter.
+  function addControls() {
+    let q = ''
+    const permCb = el('input', { type: 'checkbox', checked: true })
+    const listBox = el('div.ac-list')
+    const input = el('input', { placeholder: 'Type to search — e.g. “one arm pull up”' })
 
-    // Add a blank custom exercise
-    const addCustom = async () => {
-      const name = 'New exercise'
-      exercises.push({ key: uniqueKey(slug(name), exercises), name, muscle: '', sets: 3, rir: '1–2', rest: 240 })
-      await saveProgram(exercises); refresh()
+    const addEntry = async (entry) => {
+      const item = { ...entry, key: uniqueKey(entry.key, [...templateExercises, ...tempExercises]) }
+      if (permCb.checked) { templateExercises.push(item); await savePermanent() }
+      else { tempExercises.push({ ...item, temp: true }); await saveTemporary() }
+      ctx.toast(permCb.checked ? 'Added to the day template' : 'Added for today only')
+      refresh()
     }
+
+    const render = () => {
+      clear(listBox)
+      const matches = libMatches(q, library)
+      for (const e of matches) {
+        listBox.append(el('button', { onclick: () => addEntry(e) },
+          el('div', e.name),
+          el('div.muted', `${e.muscle || '—'} · ${e.sets} sets · RIR ${e.rir || '—'}`)))
+      }
+      const qt = q.trim()
+      if (qt && !matches.some((m) => m.name.toLowerCase() === qt.toLowerCase())) {
+        listBox.append(el('button', {
+          onclick: async () => {
+            const entry = await db.addLibraryEntry({ name: qt })
+            if (entry) await addEntry(entry)
+          },
+        }, el('div', `+ New exercise “${qt}”`), el('div.muted', 'Added to your library for reuse')))
+      }
+    }
+    input.addEventListener('input', (e) => { q = e.target.value; render() })
 
     return el('div.card',
       el('label', 'Add exercise'),
-      sel,
-      el('button.btn.full', { style: { marginTop: '10px' }, onclick: addCustom }, '+ Add a custom exercise'))
+      input,
+      listBox,
+      el('div.row.between', { style: { marginTop: '10px' } },
+        el('label.chk', permCb, el('span', 'Permanent (stays in this day’s template)')),
+        el('button.btn.ghost.sm', { onclick: () => { managingLibrary = true; refresh() } }, '📚 Library')))
   }
 
-  // ---- Day-type manager (add / rename / reorder / configure / delete) --------
+  // ---- Exercise-library manager (add / edit / delete canonical entries) ------
+  function libraryRow(e) {
+    const patch = (p) => db.updateLibraryEntry(e.key, p)
+    const bind = (input, key, numeric) => {
+      input.addEventListener('change', () => {
+        const v = input.value.trim()
+        patch({ [key]: numeric ? (v === '' ? '' : Number(v)) : v })
+      })
+      return input
+    }
+    const check = (labelText, key) => {
+      const cb = el('input', { type: 'checkbox' }); cb.checked = !!e[key]
+      cb.addEventListener('change', () => patch({ [key]: cb.checked || undefined }))
+      return el('label.chk', cb, el('span', labelText))
+    }
+    const remove = async () => {
+      if (!confirm(`Remove “${e.name}” from the library? Logged history and day templates are not affected.`)) return
+      await db.deleteLibraryEntry(e.key)
+      ctx.toast('Removed from library'); refresh()
+    }
+    return el('div.card.tight',
+      el('div.row.between',
+        // Renaming changes the display name only; the key stays the stable join key.
+        el('div', { style: { flex: '1 1 auto' } }, bind(el('input', { value: e.name || '', placeholder: 'Name' }), 'name')),
+        el('button.btn.danger.sm', { style: { marginLeft: '8px' }, onclick: remove }, '✕')),
+      el('div', { style: { marginTop: '8px' } }, bind(el('input', { value: e.muscle || '', placeholder: 'Muscle' }), 'muscle')),
+      el('div.grid3', { style: { marginTop: '8px' } },
+        el('div', el('label', 'Sets'), bind(el('input', { inputmode: 'numeric', value: e.sets ?? '' }), 'sets', true)),
+        el('div', el('label', 'RIR'), bind(el('input', { value: e.rir ?? '' }), 'rir')),
+        el('div', el('label', 'Rest (s)'), bind(el('input', { inputmode: 'numeric', value: e.rest ?? '' }), 'rest', true))),
+      el('div.spread', { style: { marginTop: '8px' } },
+        check('Unilateral L/R', 'unilateral'),
+        check('To failure', 'toFailure')),
+      el('div.muted', { style: { fontSize: '11px', marginTop: '6px' } }, `key: ${e.key}`))
+  }
+
+  function manageLibraryView() {
+    const newName = el('input', { placeholder: 'New exercise name' })
+    const newMuscle = el('input', { placeholder: 'Muscle (optional)' })
+    const add = async () => {
+      if (!newName.value.trim()) { ctx.toast('Name the exercise'); return }
+      await db.addLibraryEntry({ name: newName.value, muscle: newMuscle.value.trim() })
+      ctx.toast('Added to library'); refresh()
+    }
+    return el('div',
+      el('div.row.between', { style: { marginBottom: '6px' } },
+        el('h1', { style: { margin: 0 } }, 'Exercise library'),
+        el('button.btn.ghost.sm', { onclick: () => { managingLibrary = false; refresh() } }, 'Done')),
+      el('p.sub', 'The canonical exercise list. Adding an exercise to a day picks from here, so the same movement always logs under one key and Progress shows a single series.'),
+      ...library.map((e) => libraryRow(e)),
+      el('div.card', { style: { marginTop: '12px' } },
+        el('div.exname', { style: { marginBottom: '8px' } }, 'Add an exercise'),
+        newName,
+        el('div', { style: { marginTop: '8px' } }, newMuscle),
+        el('div', { style: { marginTop: '10px' } },
+          el('button.btn.primary', { onclick: add }, '+ Add to library'))))
+  }
+
+  // ---- Day-type manager (lifting days only — sports live in the Sports tab) --
   async function moveDay(dayNames, idx, dir) {
     const j = idx + dir
     if (j < 0 || j >= dayNames.length) return
@@ -274,32 +432,8 @@ export async function LogView(ctx) {
       ctx.toast('Renamed'); refresh()
     })
 
-    const kindSel = el('select', ['lifting', 'bouldering', 'martial', 'cardio'].map((k) => el('option', { value: k, selected: meta.kind === k }, k)))
-    kindSel.addEventListener('change', async () => {
-      const k = kindSel.value
-      await db.updateDayType(name, { kind: k, martial: k === 'martial' ? (meta.martialCfg || { unit: 'rounds', kinds: [] }) : null })
-      ctx.toast('Updated'); refresh()
-    })
-
     const wdSel = el('select', WD_OPTS.map((w) => el('option', { value: w, selected: (meta.weekday || '') === w }, w || '— weekday —')))
     wdSel.addEventListener('change', async () => { await db.updateDayType(name, { weekday: wdSel.value }); ctx.toast('Updated') })
-
-    let kindsBlock = null
-    if (meta.kind === 'martial') {
-      let kinds = [...((meta.martialCfg && meta.martialCfg.kinds) || [])]
-      const boxes = MARTIAL_KINDS.map((k) => {
-        const cb = el('input', { type: 'checkbox' }); cb.checked = kinds.includes(k)
-        cb.addEventListener('change', async () => {
-          const s = new Set(kinds); cb.checked ? s.add(k) : s.delete(k)
-          kinds = MARTIAL_KINDS.filter((x) => s.has(x))
-          await db.updateDayType(name, { martial: { unit: (meta.martialCfg && meta.martialCfg.unit) || 'rounds', kinds } })
-        })
-        return el('label.chk', cb, el('span', KIND_LABEL[k] || k))
-      })
-      kindsBlock = el('div', { style: { marginTop: '8px' } },
-        el('div.muted', { style: { fontSize: '12px', marginBottom: '4px' } }, 'Tagged lists this session shows:'),
-        el('div.spread', boxes))
-    }
 
     return el('div.card',
       el('div.row.between',
@@ -308,21 +442,17 @@ export async function LogView(ctx) {
           el('button.btn.ghost.sm', { onclick: () => moveDay(dayNames, idx, -1), disabled: idx === 0 }, '↑'),
           el('button.btn.ghost.sm', { onclick: () => moveDay(dayNames, idx, 1), disabled: idx === dayNames.length - 1 }, '↓'),
           el('button.btn.danger.sm', { onclick: () => removeDay(name) }, '✕'))),
-      el('div.grid2', { style: { marginTop: '8px' } },
-        el('div', el('label', 'Kind'), kindSel),
-        el('div', el('label', 'Weekday'), wdSel)),
-      kindsBlock)
+      el('div', { style: { marginTop: '8px' } },
+        el('label', 'Weekday'), wdSel))
   }
 
   function manageDaysView(program, dayNames) {
     const addName = el('input', { placeholder: 'New day name — e.g. Upper' })
-    const addKind = el('select', ['lifting', 'bouldering', 'martial', 'cardio'].map((k) => el('option', { value: k }, k)))
     const addWd = el('select', WD_OPTS.map((w) => el('option', { value: w }, w || '— weekday —')))
     const add = async () => {
       const nm = addName.value.trim()
       if (!nm) { ctx.toast('Name the day'); return }
-      const k = addKind.value
-      const created = await db.addDayType({ name: nm, kind: k, weekday: addWd.value, martial: k === 'martial' ? { unit: 'rounds', kinds: [] } : null })
+      const created = await db.addDayType({ name: nm, weekday: addWd.value })
       if (!created) { ctx.toast('Name already exists'); return }
       ctx.toast('Day added'); refresh()
     }
@@ -330,149 +460,15 @@ export async function LogView(ctx) {
       el('div.row.between', { style: { marginBottom: '6px' } },
         el('h1', { style: { margin: 0 } }, 'Manage days'),
         el('button.btn.ghost.sm', { onclick: () => { managingDays = false; refresh() } }, 'Done')),
-      el('p.sub', 'Add, rename, reorder or configure your session days. Renaming carries over your logged history. A lifting day’s exercises are edited from its Log screen (“Edit exercises”).'),
+      el('p.sub', 'Your lifting days. Renaming carries over your logged history; a day’s exercises are edited from its Log screen (“Edit exercises”). Non-gym activities live in the Sports tab.'),
       ...dayNames.map((n) => dayRow(program, dayNames, n)),
       el('div.card', { style: { marginTop: '12px' } },
-        el('div.exname', { style: { marginBottom: '8px' } }, 'Add a day'),
+        el('div.exname', { style: { marginBottom: '8px' } }, 'Add a lifting day'),
         addName,
-        el('div.grid2', { style: { marginTop: '8px' } },
-          el('div', el('label', 'Kind'), addKind),
-          el('div', el('label', 'Weekday'), addWd)),
+        el('div', { style: { marginTop: '8px' } },
+          el('label', 'Weekday'), addWd),
         el('div', { style: { marginTop: '10px' } },
           el('button.btn.primary', { onclick: add }, '+ Add day'))))
-  }
-
-  // ---- Martial-arts session form --------------------------------------------
-  function martialCard(session, techTitles = [], cfg = { kinds: [] }) {
-    const m = session?.martial || {}
-    const data = { rounds: m.rounds ?? '', minutes: m.minutes ?? '', mainFocus: m.mainFocus ?? '', notes: m.notes ?? '' }
-    for (const k of cfg.kinds) data[k] = Array.isArray(m[k]) ? m[k].map((it) => ({ ...it })) : []
-    const conf = Array.isArray(m.confidence) ? m.confidence.map((c) => ({ ...c })) : []
-
-    const persist = async (patch) => {
-      const id = await ensureSession()
-      const cur = (await db.get('sessions', id)).martial || {}
-      await db.update('sessions', id, { martial: { ...cur, ...patch } })
-    }
-
-    const field = (labelText, key, ph, mode, ta) => {
-      let val = data[key]
-      const input = ta ? el('textarea', { placeholder: ph }) : el('input', { inputmode: mode || 'text', placeholder: ph })
-      input.value = val
-      input.addEventListener('input', (e) => (val = e.target.value))
-      input.addEventListener('blur', () => persist({ [key]: val }))
-      return el('div', { style: { marginTop: '10px' } }, el('label', labelText), input)
-    }
-
-    const itemRow = (kind, item, i) => {
-      let val = item.text
-      const input = el('input', { placeholder: `${KIND_LABEL[kind] || kind} — what happened?`, value: val })
-      input.addEventListener('input', (e) => (val = e.target.value))
-      input.addEventListener('blur', () => { data[kind][i].text = val; persist({ [kind]: data[kind] }) })
-      const cycle = async () => {
-        const next = { '': 'good', good: 'bad', bad: '' }
-        data[kind][i].outcome = next[item.outcome || '']
-        await persist({ [kind]: data[kind] }); refresh()
-      }
-      const mark = item.outcome === 'good' ? '✓' : item.outcome === 'bad' ? '✗' : '•'
-      const cls = item.outcome === 'good' ? '.good' : item.outcome === 'bad' ? '.bad' : ''
-      return el('div.row', { style: { gap: '6px', marginTop: '6px' } },
-        el('button.outcome' + cls, { onclick: cycle, title: 'Tap: right / wrong / neutral' }, mark),
-        input,
-        el('button.btn.ghost.sm', { onclick: async () => { data[kind].splice(i, 1); await persist({ [kind]: data[kind] }); refresh() } }, '✕'))
-    }
-
-    const kindSection = (kind) => el('div', { style: { marginTop: '14px' } },
-      el('label', KIND_LABEL[kind] || kind),
-      data[kind].map((it, i) => itemRow(kind, it, i)),
-      el('button.btn.ghost.sm', {
-        style: { marginTop: '8px' },
-        onclick: async () => { data[kind].push({ text: '', outcome: '' }); await persist({ [kind]: data[kind] }); refresh() },
-      }, '+ add'))
-
-    // Per-technique confidence (1–10), tracked over time in the Progress tab.
-    const confEntry = (c, i) => {
-      let name = c.name ?? ''
-      const nameInput = el('input', { placeholder: 'Technique name', value: name, list: 'tech-conf-list' })
-      nameInput.addEventListener('input', (e) => (name = e.target.value))
-      nameInput.addEventListener('blur', () => { data.confidence[i].name = name; persist({ confidence: data.confidence }) })
-      const lvlOut = el('span.lvl', `${c.level || 5}/10`)
-      const range = el('input', { type: 'range', min: '1', max: '10', value: String(c.level || 5) })
-      range.addEventListener('input', (e) => { lvlOut.textContent = `${e.target.value}/10` })
-      range.addEventListener('change', (e) => { data.confidence[i].level = +e.target.value; persist({ confidence: data.confidence }) })
-      return el('div.card.tight', { style: { marginTop: '8px' } },
-        el('div.row', { style: { gap: '6px' } },
-          nameInput,
-          el('button.btn.ghost.sm', { onclick: async () => { data.confidence.splice(i, 1); await persist({ confidence: data.confidence }); refresh() } }, '✕')),
-        el('div.row', { style: { gap: '10px', marginTop: '8px' } }, range, lvlOut))
-    }
-    data.confidence = conf
-    const confSection = el('div', { style: { marginTop: '14px' } },
-      el('label', 'Technique confidence (tracked in Progress)'),
-      el('div.muted', { style: { fontSize: '12px', marginTop: '-2px', marginBottom: '2px' } }, 'Rate how confident you feel in a technique — charts over time in Progress.'),
-      conf.map((c, i) => confEntry(c, i)),
-      el('datalist#tech-conf-list', techTitles.map((t) => el('option', { value: t }))),
-      el('button.btn.ghost.sm', {
-        style: { marginTop: '8px' },
-        onclick: async () => { data.confidence.push({ name: '', level: 5 }); await persist({ confidence: data.confidence }); refresh() },
-      }, '+ rate a technique'))
-
-    return el('div.card',
-      el('div.exname', `${dayType} session`),
-      el('div.exmeta', { style: { marginBottom: '4px' } }, 'Tap the ● to tag each item: ✓ went right · ✗ went wrong'),
-      el('div.grid2',
-        field('Rounds', 'rounds', 'e.g. 5', 'numeric'),
-        field('Time (min)', 'minutes', 'e.g. 60', 'numeric')),
-      field('Main technique to work on', 'mainFocus', 'e.g. knee-cut passing', 'text'),
-      cfg.kinds.map((k) => kindSection(k)),
-      confSection,
-      field('Session notes', 'notes', 'Partners, rolls, how it felt…', 'text', true))
-  }
-
-  async function boulderingCard(session) {
-    const b = session?.bouldering || { minutes: '', grades: '', notes: '' }
-    const save = async (patch) => {
-      const id = await ensureSession()
-      const cur = (await db.get('sessions', id)).bouldering || {}
-      await db.update('sessions', id, { bouldering: { ...cur, ...patch } })
-    }
-    const fieldB = (labelText, key, ph, ta) => {
-      let val = b[key] ?? ''
-      const input = (ta ? el('textarea', { placeholder: ph }) : el('input', { inputmode: key === 'minutes' ? 'numeric' : 'text', placeholder: ph }))
-      input.value = val
-      input.addEventListener('input', (e) => (val = e.target.value))
-      input.addEventListener('blur', () => save({ [key]: val }))
-      return el('div', { style: { marginTop: '10px' } }, el('label', labelText), input)
-    }
-    return el('div.card',
-      el('div.exname', 'Bouldering session'),
-      el('div.exmeta', { style: { marginBottom: '4px' } }, 'Logged as a back / grip day'),
-      fieldB('Session time (minutes)', 'minutes', ''),
-      fieldB('Grades climbed', 'grades', 'e.g. V3, V4, V4, V5 flash'),
-      fieldB('Notes', 'notes', 'Projects, skin, grip fatigue…', true))
-  }
-
-  async function cardioCard(session) {
-    const c = session?.cardio || { distance: '', minutes: '', notes: '' }
-    const save = async (patch) => {
-      const id = await ensureSession()
-      const cur = (await db.get('sessions', id)).cardio || {}
-      await db.update('sessions', id, { cardio: { ...cur, ...patch } })
-    }
-    const fieldC = (labelText, key, ph, mode, ta) => {
-      let val = c[key] ?? ''
-      const input = (ta ? el('textarea', { placeholder: ph }) : el('input', { inputmode: mode || 'text', placeholder: ph }))
-      input.value = val
-      input.addEventListener('input', (e) => (val = e.target.value))
-      input.addEventListener('blur', () => save({ [key]: val }))
-      return el('div', { style: { marginTop: '10px' } }, el('label', labelText), input)
-    }
-    return el('div.card',
-      el('div.exname', `${dayType} session`),
-      el('div.exmeta', { style: { marginBottom: '4px' } }, 'Cardio — distance, time, notes'),
-      fieldC('Distance (km)', 'distance', 'e.g. 5.0', 'decimal'),
-      fieldC('Time (minutes)', 'minutes', 'e.g. 28', 'numeric'),
-      fieldC('Notes', 'notes', 'Route, RPE, how it felt…', 'text', true))
   }
 
   function notesCard(session) {
@@ -496,6 +492,14 @@ export async function LogView(ctx) {
         s.sub && el('div.muted', { style: { fontSize: '12px' } }, s.sub))))
   }
 
+  function deloadBanner(status) {
+    if (!status.warn) return null
+    return el('div.card.warn',
+      el('strong', { style: { fontSize: '14px' } }, '⚠️ Consider a deload / rest day'),
+      el('div.muted', { style: { fontSize: '12px', marginTop: '4px' } }, status.reasons.join(' · ')),
+      el('div.muted', { style: { fontSize: '11px', marginTop: '4px' } }, 'Rule-based, not AI — details on the Readiness tab.'))
+  }
+
   async function copyForAI(session) {
     if (!session) { ctx.toast('Nothing logged yet'); return }
     const sets = await db.byIndex('sets', 'sessionId', session.id)
@@ -507,29 +511,37 @@ export async function LogView(ctx) {
 
   // ---- Render ----------------------------------------------------------------
   async function refresh() {
-    const program = await db.getProgram()
-    const dayNames = Object.keys(program)
+    const [program, sports, dayTypes, allSessions, allSets, allReadiness, injuries] = await Promise.all([
+      db.getProgram(), db.getSports(), db.getDayTypes(), db.all('sessions'), db.all('sets'), db.all('readiness'), db.all('injuries'),
+    ])
+    library = await db.getExerciseLibrary()
+
+    // The Log tab is pure lifting: sports (martial / bouldering / running /
+    // calisthenics / stretching) are logged from the Sports tab.
+    const sportNames = new Set(sports.map((s) => s.name))
+    const dayNames = Object.keys(program).filter((n) => program[n].kind === 'lifting' && !sportNames.has(n))
     const days = dayNames.map((n) => ({ name: n, weekday: program[n].weekday }))
     if (!dayType || !dayNames.includes(dayType)) dayType = defaultDayFor(date, days)
 
+    if (managingLibrary) { clear(root); mount(root, manageLibraryView()); window.scrollTo(0, 0); return }
     if (managingDays) { clear(root); mount(root, manageDaysView(program, dayNames)); window.scrollTo(0, 0); return }
 
     const dayMeta = program[dayType] || {}
-    const exercises = dayMeta.exercises || []
-    const isBouldering = dayMeta.kind === 'bouldering'
-    const isMartialDay = dayMeta.kind === 'martial'
-    const isCardio = dayMeta.kind === 'cardio'
-    const isLifting = !isBouldering && !isMartialDay && !isCardio
+    templateExercises = dayMeta.exercises || []
+    tempExercises = (await db.getSessionExercises(date, dayType)).map((e) => ({ ...e, temp: true }))
+    const exercises = [...templateExercises, ...tempExercises]
 
-    const session = (await db.all('sessions')).find((s) => s.date === date && s.dayType === dayType)
-    const sets = session ? await db.byIndex('sets', 'sessionId', session.id) : []
+    const session = allSessions.find((s) => s.date === date && s.dayType === dayType)
+    const sets = session ? allSets.filter((s) => s.sessionId === session.id) : []
     const isRestDay = new Date(date + 'T12:00:00').getDay() === 0
     const loggedCount = sets.filter((s) => s.reps != null).length
-    const techTitles = isMartialDay ? (await db.all('techniques')).map((t) => t.title).filter(Boolean) : []
+
+    const today = db.todayISO()
+    const weekly = weeklyLoad({ sessions: allSessions, sets: allSets, kindByDay: kindByDayMap(dayTypes, sports), weeks: 4, today })
+    const deload = deloadStatus({ readiness: allReadiness, sessions: allSessions, weekly, injuries, today })
 
     let suggestions = []
-    if (isLifting && showSuggestions && !editing) {
-      const [allSessions, allSets] = await Promise.all([db.all('sessions'), db.all('sets')])
+    if (showSuggestions && !editing) {
       suggestions = buildSuggestions({ dayType, exercises, sessions: allSessions, sets: allSets, today: date })
     }
 
@@ -541,7 +553,8 @@ export async function LogView(ctx) {
     clear(root)
     mount(root,
       el('h1', 'Log Workout'),
-      el('p.sub', loggedCount > 0 ? `${loggedCount} sets logged` : 'Pick a day and start logging. Lifting + a martial-arts session can share one date.'),
+      el('p.sub', loggedCount > 0 ? `${loggedCount} sets logged` : 'Pick a day and start logging. Sports (BJJ, bouldering, running…) are logged in the Sports tab.'),
+      deloadBanner(deload),
       el('div.card',
         el('div.grid2',
           el('div', el('label', 'Date'), dateInput),
@@ -552,8 +565,8 @@ export async function LogView(ctx) {
         el('div.spread', { style: { marginTop: '12px' } },
           el('button.btn.ghost.sm', { onclick: () => copyForAI(session) }, '📋 Copy for AI'),
           el('button.btn.ghost.sm', { onclick: () => { managingDays = true; refresh() } }, '🗓 Manage days'),
-          isLifting && el('button.btn.ghost.sm', { onclick: () => { editing = !editing; refresh() } }, editing ? '✓ Done editing' : '✎ Edit exercises'),
-          isLifting && dayMeta.customised && dayMeta.hasDefault && el('button.btn.ghost.sm', {
+          el('button.btn.ghost.sm', { onclick: () => { editing = !editing; refresh() } }, editing ? '✓ Done editing' : '✎ Edit exercises'),
+          dayMeta.customised && dayMeta.hasDefault && el('button.btn.ghost.sm', {
             onclick: async () => { if (confirm(`Reset ${dayType} to the default exercises? Your logged sets are kept.`)) { await db.resetDay(dayType); editing = false; refresh() } },
           }, '↺ Reset day'),
           session && el('button.btn.danger.sm', {
@@ -562,21 +575,20 @@ export async function LogView(ctx) {
 
       suggestionsCard(suggestions),
 
-      isLifting && !editing && el('div.card.tight',
+      !editing && el('div.card.tight',
         el('strong', { style: { fontSize: '13px' } }, 'Warm-up'),
         el('div.muted', { style: { fontSize: '13px', marginTop: '2px' } }, WARMUP)),
 
-      // Body: editor / martial / bouldering / exercises
-      editing && isLifting
-        ? [el('p.sub', { style: { marginTop: '4px' } }, 'Add, remove, reorder or tweak this day’s exercises. Changes are saved to this day only.'),
-           exercises.map((ex, i) => editorCard(ex, i, exercises)),
-           addControls(exercises)]
-        : isMartialDay ? martialCard(session, techTitles, dayMeta.martialCfg)
-        : isBouldering ? await boulderingCard(session)
-        : isCardio ? await cardioCard(session)
-        : exercises.length
-          ? exercises.map((ex) => exerciseCard(ex, sets.filter((s) => s.exerciseKey === ex.key)))
-          : el('div.empty', 'No exercises for this day. Tap “Edit exercises” to add some.'),
+      // Body: editor / exercise cards
+      editing
+        ? [el('p.sub', { style: { marginTop: '4px' } }, 'Add, remove, reorder or tweak this day’s exercises. Permanent = saved to the day template; unticked = today only.'),
+           templateExercises.map((ex, i) => editorCard(ex, i, templateExercises)),
+           tempExercises.map((ex, i) => editorCard(ex, i, tempExercises)),
+           addControls()]
+        : [exercises.length
+            ? exercises.map((ex) => exerciseCard(ex, sets.filter((s) => s.exerciseKey === ex.key)))
+            : el('div.empty', 'No exercises for this day. Tap “Edit exercises” to add some.'),
+           addControls()],
 
       !editing && notesCard(session),
     )

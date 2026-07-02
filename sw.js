@@ -1,6 +1,6 @@
 // Hand-written service worker — caches the full app shell so the PWA launches
 // and works with zero network (offline-first). Bump CACHE to ship an update.
-const CACHE = 'workout-tracker-v6'
+const CACHE = 'workout-tracker-v7'
 
 const SHELL = [
   './',
@@ -14,12 +14,15 @@ const SHELL = [
   './src/recommend.js',
   './src/aiReport.js',
   './src/markdown.js',
+  './src/load.js',
+  './src/deload.js',
   './src/components/chart.js',
   './src/components/timer.js',
   './src/views/log.js',
   './src/views/progress.js',
   './src/views/readiness.js',
   './src/views/techniques.js',
+  './src/views/sports.js',
   './src/views/data.js',
   './icons/favicon.svg',
   './icons/apple-touch-icon.png',

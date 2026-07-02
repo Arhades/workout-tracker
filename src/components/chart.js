@@ -1,24 +1,39 @@
 import { el } from '../dom.js'
 
 // Tiny SVG line chart. series = [{ label, color, points:[{x,y}] }] sharing an x-domain.
-export function chart(series, { height = 170, yLabel } = {}) {
+// `yStep`: snap the y-axis to multiples of the step (min down, max up) and draw a
+// gridline + integer label at every multiple — e.g. yStep 5 for kg charts gives
+// …40, 45, 50… If that would exceed ~8 lines, the step doubles (5 → 10 → 20 …).
+export function chart(series, { height = 170, yLabel, yStep } = {}) {
   const all = series.flatMap((s) => s.points)
   if (all.length === 0) return el('div.empty', 'No data yet.')
 
   const W = 320, H = height, padL = 34, padR = 10, padT = 12, padB = 22
+  const MAX_GRIDLINES = 8
   const xs = all.map((p) => +new Date(p.x))
   const ys = all.map((p) => p.y)
   const xMin = Math.min(...xs), xMax = Math.max(...xs)
   let yMin = Math.min(...ys), yMax = Math.max(...ys)
-  if (yMin === yMax) { yMin -= 1; yMax += 1 }
-  const yPad = (yMax - yMin) * 0.1
-  yMin -= yPad; yMax += yPad
+  let yTicks
+  if (yStep) {
+    let step = yStep
+    while (Math.ceil(yMax / step) - Math.floor(yMin / step) > MAX_GRIDLINES) step *= 2
+    yMin = Math.floor(yMin / step) * step
+    yMax = Math.ceil(yMax / step) * step
+    if (yMin === yMax) yMax += step
+    yTicks = []
+    for (let t = yMin; t <= yMax + step / 1000; t += step) yTicks.push(t)
+  } else {
+    if (yMin === yMax) { yMin -= 1; yMax += 1 }
+    const yPad = (yMax - yMin) * 0.1
+    yMin -= yPad; yMax += yPad
+    yTicks = Array.from({ length: 4 }, (_, i) => yMin + (i / 3) * (yMax - yMin))
+  }
 
   const sx = (x) => padL + (xMax === xMin ? 0.5 : (+new Date(x) - xMin) / (xMax - xMin)) * (W - padL - padR)
   const sy = (y) => padT + (1 - (y - yMin) / (yMax - yMin)) * (H - padT - padB)
 
-  const round = (n) => (Math.abs(n) >= 100 ? Math.round(n) : Math.round(n * 10) / 10)
-  const yTicks = Array.from({ length: 4 }, (_, i) => yMin + (i / 3) * (yMax - yMin))
+  const round = (n) => (yStep || Math.abs(n) >= 100 ? Math.round(n) : Math.round(n * 10) / 10)
 
   let svg = `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img">`
   for (const t of yTicks) {

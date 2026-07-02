@@ -2,14 +2,14 @@ import { el, clear } from './dom.js'
 import { LogView } from './views/log.js'
 import { ProgressView } from './views/progress.js'
 import { ReadinessView } from './views/readiness.js'
-import { TechniquesView } from './views/techniques.js'
+import { SportsView } from './views/sports.js'
 import { DataView } from './views/data.js'
 
 const TABS = [
   { id: 'log', label: 'Log', ico: '🏋️', view: LogView },
   { id: 'progress', label: 'Progress', ico: '📈', view: ProgressView },
   { id: 'readiness', label: 'Readiness', ico: '🔋', view: ReadinessView },
-  { id: 'techniques', label: 'Techniques', ico: '📚', view: TechniquesView },
+  { id: 'sports', label: 'Sports', ico: '🥋', view: SportsView },
   { id: 'data', label: 'Data', ico: '💾', view: DataView },
 ]
 

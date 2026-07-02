@@ -2,11 +2,13 @@ import { el, clear, mount } from '../dom.js'
 import * as db from '../db.js'
 import { EXERCISE_INDEX } from '../program.js'
 import { chart, legend } from '../components/chart.js'
+import { weeklyLoad, kindByDayMap } from '../load.js'
 
 export async function ProgressView() {
   const root = el('div')
   let exKey = ''
   let confName = ''
+  let skillKey = ''
 
   async function refresh() {
     const sessions = await db.all('sessions')
@@ -39,11 +41,23 @@ export async function ProgressView() {
     const confNames = Object.keys(confByName).sort((a, b) => a.localeCompare(b))
     for (const n of confNames) confByName[n].sort((a, b) => (a.date < b.date ? -1 : 1))
 
-    clear(root)
-    mount(root, el('h1', 'Progress'), el('p.sub', 'Weight & rep trends per exercise, plus technique confidence over time.'))
+    // ---- Sport-skill series (stretching / calisthenics session metrics) -----
+    const skillByKey = {}
+    for (const s of sessions) {
+      if (!Array.isArray(s.skills)) continue
+      for (const e of s.skills) {
+        if (!e.name || e.value == null) continue
+        ;(skillByKey[`${e.name} (${s.dayType})`] ??= []).push({ date: s.date, value: e.value })
+      }
+    }
+    const skillNames = Object.keys(skillByKey).sort((a, b) => a.localeCompare(b))
+    for (const n of skillNames) skillByKey[n].sort((a, b) => (a.date < b.date ? -1 : 1))
 
-    if (!options.length && !confNames.length) {
-      root.append(el('div.empty', 'Nothing to chart yet. Log some workouts or a martial-arts session first.'))
+    clear(root)
+    mount(root, el('h1', 'Progress'), el('p.sub', 'Weight & rep trends per exercise, skill metrics, technique confidence and weekly load.'))
+
+    if (!options.length && !confNames.length && !skillNames.length && !sessions.length) {
+      root.append(el('div.empty', 'Nothing to chart yet. Log some workouts or a sports session first.'))
       return
     }
 
@@ -81,7 +95,7 @@ export async function ProgressView() {
             chart([
               { label: 'Left', color: '#f59e0b', points: perSession.filter((p) => p.leftW > 0).map((p) => ({ x: p.date, y: p.leftW })) },
               { label: 'Right', color: '#38bdf8', points: perSession.filter((p) => p.rightW > 0).map((p) => ({ x: p.date, y: p.rightW })) },
-            ], { yLabel: 'kg (heaviest set per side)' }),
+            ], { yLabel: 'kg (heaviest set per side)', yStep: 5 }),
             legend([{ label: 'Left (weaker)', color: '#f59e0b' }, { label: 'Right', color: '#38bdf8' }])),
           el('div.card',
             el('h2', { style: { marginTop: 0 } }, 'Left − Right gap (reps)'),
@@ -95,7 +109,7 @@ export async function ProgressView() {
         root.append(el('div.card',
           el('h2', { style: { marginTop: 0 } }, 'Top-set weight over time'),
           chart([{ label: 'Top set', color: '#7aa2ff', points: perSession.filter((p) => p.topW > 0).map((p) => ({ x: p.date, y: p.topW })) }],
-            { yLabel: 'kg (heaviest set per session)' }),
+            { yLabel: 'kg (heaviest set per session)', yStep: 5 }),
           el('h2', 'Total reps per session'),
           chart([{ label: 'Reps', color: '#4ade80', points: perSession.map((p) => ({ x: p.date, y: p.totalReps })) }],
             { yLabel: 'sum of reps (volume proxy)' })))
@@ -119,6 +133,48 @@ export async function ProgressView() {
           latest && el('div.muted', { style: { fontSize: '13px', marginTop: '8px' } },
             'Latest: ', el('strong', { style: { color: 'var(--text)' } }, `${latest.level}/10`),
             series.length > 1 ? ` (was ${series[0].level}/10 at first rating).` : '.')))
+    }
+
+    // ---- Sport skills (stretching / calisthenics metrics over time) ---------
+    if (skillNames.length) {
+      const activeS = skillKey && skillNames.includes(skillKey) ? skillKey : skillNames[0]
+      const series = skillByKey[activeS]
+      const sel = el('select', skillNames.map((n) => el('option', { value: n, selected: n === activeS }, n)))
+      sel.addEventListener('change', (e) => { skillKey = e.target.value; refresh() })
+      const latest = series[series.length - 1]
+      root.append(
+        el('h2', { style: { marginTop: '22px' } }, 'Sport skills'),
+        el('div.card', el('label', 'Skill'), sel),
+        el('div.card',
+          el('h2', { style: { marginTop: 0 } }, `“${activeS}”`),
+          chart([{ label: 'Metric', color: '#38bdf8', points: series.map((p) => ({ x: p.date, y: p.value })) }],
+            { yLabel: 'logged metric (hold sec / reps / rating)' }),
+          latest && el('div.muted', { style: { fontSize: '13px', marginTop: '8px' } },
+            'Latest: ', el('strong', { style: { color: 'var(--text)' } }, String(latest.value)),
+            series.length > 1 ? ` (was ${series[0].value} at first log).` : '.')))
+    }
+
+    // ---- Weekly load dashboard (combined, Mon–Sun) ---------------------------
+    const [dayTypes, sports] = await Promise.all([db.getDayTypes(), db.getSports()])
+    const weekly = weeklyLoad({ sessions, sets, kindByDay: kindByDayMap(dayTypes, sports), weeks: 10, today: db.todayISO() })
+    if (weekly.some((w) => w.sessions > 0)) {
+      const kindLine = (w) => Object.entries(w.byKind).map(([k, n]) => `${k} ${n}`).join(' · ') || '—'
+      root.append(
+        el('h2', { style: { marginTop: '22px' } }, 'Weekly load (Mon–Sun)'),
+        el('div.card',
+          el('h2', { style: { marginTop: 0 } }, 'Working sets per week'),
+          chart([{ label: 'Sets', color: '#7aa2ff', points: weekly.map((w) => ({ x: w.week, y: w.sets })) }],
+            { yLabel: 'total working sets logged' }),
+          el('h2', 'Sessions per week'),
+          chart([
+            { label: 'All', color: '#4ade80', points: weekly.map((w) => ({ x: w.week, y: w.sessions })) },
+            { label: 'Hard', color: '#f87171', points: weekly.map((w) => ({ x: w.week, y: w.hard })) },
+          ], { yLabel: 'sessions (hard = martial / heavy lifting day / long bouldering)' }),
+          legend([{ label: 'All sessions', color: '#4ade80' }, { label: 'Hard sessions', color: '#f87171' }]),
+          el('div', { style: { marginTop: '12px' } },
+            weekly.slice(-4).map((w) => el('div.kv',
+              el('span', `wk of ${w.week}`),
+              el('span.muted', kindLine(w)))))))
     }
   }
 

@@ -89,6 +89,15 @@ function cardioMarkdown(c) {
   return lines.join('\n')
 }
 
+// Stretching / calisthenics skill work stored on the session record.
+function skillsMarkdown(skills) {
+  const worked = (skills || []).filter((s) => s.name)
+  if (!worked.length) return ''
+  const lines = ['## Skills worked']
+  for (const s of worked) lines.push(`- ${s.name}${s.value != null ? `: ${s.value}` : ''}`)
+  return lines.join('\n')
+}
+
 // session: the sessions record. sets: its sets. readiness: that date's record or null.
 // meta: the day's metadata from db.getProgram() (kind / weekday / martialCfg). When
 // omitted, falls back to the static PROGRAM defaults (still works for default days).
@@ -104,6 +113,7 @@ export function sessionMarkdown({ session, sets = [], readiness = null, meta = n
   if (dm.martial) parts.push(martialMarkdown(session.dayType, session.martial, dm.martialCfg))
   else if (dm.bouldering) parts.push(boulderingMarkdown(session.bouldering))
   else if (dm.cardio) parts.push(cardioMarkdown(session.cardio))
+  else if (Array.isArray(session.skills) && session.skills.length) parts.push(skillsMarkdown(session.skills))
   else parts.push(liftsMarkdown(sets))
 
   if (session.notes) parts.push(`## Notes\n${session.notes}`)

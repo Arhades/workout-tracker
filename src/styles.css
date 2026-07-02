@@ -183,3 +183,28 @@ a.wikilink { color: var(--accent); text-decoration: none; border-bottom: 1px das
 /* Confidence slider rows (martial sessions) */
 .conf-row { display: grid; grid-template-columns: 1fr auto; gap: 8px 10px; align-items: center; margin-top: 10px; }
 .conf-row .lvl { font-weight: 700; color: var(--text); min-width: 42px; text-align: right; }
+
+/* Exercise autocomplete suggestion list (Log tab add / rename) */
+.ac-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.ac-list:empty { margin-top: 0; }
+.ac-list button {
+  text-align: left; background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 10px;
+  padding: 9px 12px; font-size: 14px;
+}
+.ac-list button .muted { font-size: 12px; margin-top: 1px; }
+
+/* Editable recommended-RIR chip on exercise cards */
+button.rir {
+  background: var(--surface-2); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 999px;
+  font-size: 11px; font-weight: 600; padding: 2px 8px; vertical-align: baseline;
+}
+
+/* Weekly-target progress bar (Readiness tab) */
+.bar { height: 6px; border-radius: 999px; background: var(--surface-2); overflow: hidden; margin-top: 8px; }
+.bar-fill { height: 100%; background: var(--accent); border-radius: 999px; }
+.bar-fill.done { background: var(--good); }
+
+/* Deload / overtraining warning card */
+.card.warn { border-color: #6b5416; }
